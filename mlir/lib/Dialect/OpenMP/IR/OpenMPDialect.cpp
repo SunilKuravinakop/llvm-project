@@ -4114,17 +4114,19 @@ LogicalResult AtomicCaptureOp::verifyRegions() {
 //===----------------------------------------------------------------------===//
 
 LogicalResult AtomicCompareOp::verify() {
+  if (verifyCommon().failed())
+    return mlir::failure();
   return verifySynchronizationHint(*this, getHint());
 }
 
 LogicalResult AtomicCompareOp::verifyRegions() {
-  Region &region = getRegion();
-  if (region.empty())
-    return emitOpError("region for atomic compare must not be empty");
+  if (verifyRegionsCommon().failed())
+    return mlir::failure();
 
-  Block &block = region.front();
-  if (block.empty())
-    return emitOpError("region body for atomic compare must not be empty");
+  if (verifyOperator().failed())
+    return mlir::failure();
+
+  Block &block = getRegion().front();
 
   Operation *terminator = block.getTerminator();
   if (!terminator || !isa<YieldOp>(terminator))

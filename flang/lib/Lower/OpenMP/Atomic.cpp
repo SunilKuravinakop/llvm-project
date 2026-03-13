@@ -13,6 +13,7 @@
 #include "flang/Evaluate/traverse.h"
 #include "flang/Evaluate/type.h"
 #include "flang/Lower/AbstractConverter.h"
+#include "flang/Lower/ConvertType.h"
 #include "flang/Lower/OpenMP/Clauses.h"
 #include "flang/Lower/PFTBuilder.h"
 #include "flang/Lower/StatementContext.h"
@@ -485,45 +486,24 @@ genAtomicOperation(lower::AbstractConverter &converter,
   }
 }
 
-/// Map a Fortran relational operator to an MLIR integer comparison predicate.
-static mlir::arith::CmpIPredicate
-mapRelationalOpToIntPredicate(Fortran::common::RelationalOperator relOpr) {
-  switch (relOpr) {
-  case Fortran::common::RelationalOperator::EQ:
-    return mlir::arith::CmpIPredicate::eq;
-  case Fortran::common::RelationalOperator::NE:
-    return mlir::arith::CmpIPredicate::ne;
-  case Fortran::common::RelationalOperator::LT:
-    return mlir::arith::CmpIPredicate::slt;
-  case Fortran::common::RelationalOperator::LE:
-    return mlir::arith::CmpIPredicate::sle;
-  case Fortran::common::RelationalOperator::GT:
-    return mlir::arith::CmpIPredicate::sgt;
-  case Fortran::common::RelationalOperator::GE:
-    return mlir::arith::CmpIPredicate::sge;
+/// Reverse a relational operator as if the operands were swapped.
+/// e.g. LT becomes GT, LE becomes GE. Symmetric operators (EQ, NE)
+/// are returned unchanged.
+static Fortran::common::RelationalOperator
+reverseRelOp(Fortran::common::RelationalOperator op) {
+  using RO = Fortran::common::RelationalOperator;
+  switch (op) {
+  case RO::LT:
+    return RO::GT;
+  case RO::LE:
+    return RO::GE;
+  case RO::GT:
+    return RO::LT;
+  case RO::GE:
+    return RO::LE;
+  default:
+    return op;
   }
-  llvm_unreachable("unexpected relational operator");
-}
-
-/// Map a Fortran relational operator to an MLIR floating-point comparison
-/// predicate (ordered).
-static mlir::arith::CmpFPredicate
-mapRelationalOpToFPPredicate(Fortran::common::RelationalOperator relOpr) {
-  switch (relOpr) {
-  case Fortran::common::RelationalOperator::EQ:
-    return mlir::arith::CmpFPredicate::OEQ;
-  case Fortran::common::RelationalOperator::NE:
-    return mlir::arith::CmpFPredicate::ONE;
-  case Fortran::common::RelationalOperator::LT:
-    return mlir::arith::CmpFPredicate::OLT;
-  case Fortran::common::RelationalOperator::LE:
-    return mlir::arith::CmpFPredicate::OLE;
-  case Fortran::common::RelationalOperator::GT:
-    return mlir::arith::CmpFPredicate::OGT;
-  case Fortran::common::RelationalOperator::GE:
-    return mlir::arith::CmpFPredicate::OGE;
-  }
-  llvm_unreachable("unexpected relational operator");
 }
 
 void Fortran::lower::omp::lowerAtomic(
@@ -587,8 +567,21 @@ void Fortran::lower::omp::lowerAtomic(
           [&](const auto &relImpl) {
             relOpr = relImpl.opr;
             using Operand = typename std::decay_t<decltype(relImpl)>::Operand;
-            expectedExprStorage = Fortran::evaluate::AsGenericExpr(
+            auto leftExpr = Fortran::evaluate::AsGenericExpr(
+                Fortran::evaluate::Expr<Operand>{relImpl.left()});
+            auto rightExpr = Fortran::evaluate::AsGenericExpr(
                 Fortran::evaluate::Expr<Operand>{relImpl.right()});
+            if (Fortran::evaluate::IsSameOrConvertOf(rightExpr, atom)) {
+              // e.g. e == x  (atom is on the right)
+              // left operand is expected value (e)
+              // reverse the operator so that the comparison becomes
+              // x <reversed-op> e.
+              expectedExprStorage = std::move(leftExpr);
+              relOpr = reverseRelOp(relOpr);
+            } else {
+              // Form: x == e  (atom is on the left, or default)
+              expectedExprStorage = std::move(rightExpr);
+            }
           },
           rel->u);
     }
@@ -616,11 +609,11 @@ void Fortran::lower::omp::lowerAtomic(
     // Generate comparison: e.g. x == e
     mlir::Value cmpResult;
     if (mlir::isa<mlir::IntegerType>(elemTypeOfX)) {
-      auto pred = mapRelationalOpToIntPredicate(relOpr);
+      auto pred = Fortran::lower::translateSignedRelational(relOpr);
       cmpResult = mlir::arith::CmpIOp::create(builder, loc, pred, blockArg,
                                               expectedVal);
     } else if (mlir::isa<mlir::FloatType>(elemTypeOfX)) {
-      auto pred = mapRelationalOpToFPPredicate(relOpr);
+      auto pred = Fortran::lower::translateFloatRelational(relOpr);
       cmpResult = mlir::arith::CmpFOp::create(builder, loc, pred, blockArg,
                                               expectedVal);
     } else {

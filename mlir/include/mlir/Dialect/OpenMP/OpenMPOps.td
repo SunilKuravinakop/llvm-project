@@ -1847,7 +1847,7 @@ def AtomicCaptureOp : OpenMP_Op<"atomic.capture", traits = [
 //===----------------------------------------------------------------------===//
 
 def AtomicCompareOp : OpenMP_Op<"atomic.compare", traits = [
-    RecursiveMemoryEffects,
+    AtomicCompareOpInterface, RecursiveMemoryEffects,
     SingleBlockImplicitTerminator<"YieldOp">
   ], clauses = [
     OpenMP_HintClause, OpenMP_MemoryOrderClause
